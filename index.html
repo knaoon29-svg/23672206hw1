@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>가위바위보 AI 게임 (점수 누적)</title>
+
+  <!-- (선택) 귀여운 폰트 -->
+  <link href="https://fonts.googleapis.com/css2?family=Gaegu:wght@400;700&display=swap" rel="stylesheet">
+
+  <style>
+    body{
+      margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+      font-family:'Gaegu', cursive;
+      background: linear-gradient(#dff1ff, #fefefe);
+    }
+    .wrap{
+      width: 420px; max-width: calc(100vw - 24px);
+      background:#fffaf0; border:5px solid #f3e6c8; border-radius:30px;
+      padding:22px 22px 18px; box-shadow:0 15px 30px rgba(0,0,0,0.15);
+      text-align:center;
+    }
+    h1{ margin:0 0 6px; color:#5b4636; font-size:28px; }
+    .sub{ color:#8a7563; font-size:15px; margin-bottom:14px; line-height:1.2; }
+    .row{ display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin: 10px 0 14px; }
+    button{
+      background:#a8d5ba; border:none; border-radius:18px; padding:10px 16px;
+      font-size:18px; cursor:pointer; color:#355f4e;
+      box-shadow:0 6px 0 #7fb69a; transition: transform .15s, box-shadow .15s;
+    }
+    button:hover{ transform: translateY(2px); box-shadow:0 4px 0 #7fb69a; }
+    button.secondary{ background:#f3e6c8; color:#5b4636; box-shadow:0 6px 0 #d8c9a4; }
+    button.secondary:hover{ box-shadow:0 4px 0 #d8c9a4; }
+    button.danger{ background:#ffd6d6; color:#7a2b2b; box-shadow:0 6px 0 #e8a8a8; }
+    button.danger:hover{ box-shadow:0 4px 0 #e8a8a8; }
+
+    .panel{
+      background:#f0f7f3; border:3px dashed #c6e3d5; border-radius:22px;
+      padding:10px; margin-bottom:10px;
+    }
+    canvas{ border-radius:16px; }
+    .score{
+      display:flex; justify-content:space-between; gap:10px;
+      background:#fff; border-radius:18px; padding:10px 12px; margin:10px 0;
+      box-shadow:0 3px 6px rgba(0,0,0,0.08);
+      color:#5b4636; font-size:18px;
+    }
+    .score b{ font-size:20px; }
+    .status{
+      background:#fff; border-radius:18px; padding:10px 12px; margin:10px 0 0;
+      box-shadow:0 3px 6px rgba(0,0,0,0.08);
+      color:#5b4636; font-size:18px; line-height:1.25;
+      white-space:pre-line;
+    }
+    .tiny{ font-size:13px; color:#8a7563; margin-top:10px; line-height:1.2; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <h1>🌱 작은 AI 가위바위보</h1>
+    <div class="sub">3,2,1 카운트 후 한 번만 판정하고<br>자동으로 다음 라운드를 시작해요</div>
+
+    <div class="row">
+      <button id="btnStart" type="button">🎮 시작</button>
+      <button id="btnStop" type="button" class="secondary">⏸️ 일시정지</button>
+      <button id="btnReset" type="button" class="danger">🔄 점수 초기화</button>
+    </div>
+
+    <div class="panel" id="webcam-container"></div>
+
+    <div class="score">
+      <div>🙋 사용자: <b id="uScore">0</b></div>
+      <div>🤝 무승부: <b id="dScore">0</b></div>
+      <div>💻 컴퓨터: <b id="cScore">0</b></div>
+    </div>
+
+    <div class="status" id="status">대기 중… (시작 버튼을 눌러 주세요)</div>
+
+    <div class="tiny">
+      ✅ 모델 클래스는 반드시 “가위 / 바위 / 보”여야 합니다.<br>
+      (다르면 아래 CHOICES 값을 모델 클래스명과 동일하게 바꾸세요)
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+  <script>
+    // ✅ Teachable Machine 모델 URL (사용자 제공)
+    const URL = "https://teachablemachine.withgoogle.com/models/kMHQfboVr/";
+
+    // ✅ 모델 클래스명 (Teachable Machine의 className과 '완전히 동일'해야 함)
+    const CHOICES = ["가위", "바위", "보"];
+
+    // 게임 설정
+    const COUNTDOWN_SECONDS = 3;       // 3,2,1
+    const BETWEEN_ROUND_MS = 2500;     // 결과 표시 후 다음 라운드까지 대기
+    const MIN_CONFIDENCE = 0.60;       // 인식 신뢰도(0~1). 낮으면 "다시 해봐요" 처리
+
+    let model, webcam, maxPredictions;
+
+    // 상태
+    let initialized = false;
+    let running = false;              // 전체 게임 진행 여부
+    let phase = "idle";               // idle | countdown | capture | result
+    let countdown = COUNTDOWN_SECONDS;
+    let computerChoice = "";
+    let countdownTimer = null;
+    let nextRoundTimer = null;
+
+    // 점수
+    let userScore = 0;
+    let compScore = 0;
+    let drawScore = 0;
+
+    const $webcam = document.getElementById("webcam-container");
+    const $status = document.getElementById("status");
+    const $uScore = document.getElementById("uScore");
+    const $cScore = document.getElementById("cScore");
+    const $dScore = document.getElementById("dScore");
+
+    document.getElementById("btnStart").addEventListener("click", async () => {
+      if (!initialized) {
+        await init();
+      }
+      startGame();
+    });
+
+    document.getElementById("btnStop").addEventListener("click", () => {
+      stopGame("일시정지됨. 다시 시작을 누르면 이어집니다.");
+    });
+
+    document.getElementById("btnReset").addEventListener("click", () => {
+      userScore = 0; compScore = 0; drawScore = 0;
+      renderScores();
+      stopGame("점수를 초기화했어요. 시작을 누르면 새로 진행합니다.");
+    });
+
+    function renderScores(){
+      $uScore.textContent = String(userScore);
+      $cScore.textContent = String(compScore);
+      $dScore.textContent = String(drawScore);
+    }
+
+    function setStatus(text){
+      $status.textContent = text;
+    }
+
+    function clearTimers(){
+      if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      if (nextRoundTimer) { clearTimeout(nextRoundTimer); nextRoundTimer = null; }
+    }
+
+    function stopGame(message){
+      running = false;
+      phase = "idle";
+      clearTimers();
+      if (message) setStatus(message);
+    }
+
+    function getComputerChoice(){
+      return CHOICES[Math.floor(Math.random() * CHOICES.length)];
+    }
+
+    function judge(user, computer){
+      if (user === computer) return "DRAW";
+      if (
+        (user === "가위" && computer === "보") ||
+        (user === "바위" && computer === "가위") ||
+        (user === "보" && computer === "바위")
+      ) return "WIN";
+      return "LOSE";
+    }
+
+    async function init(){
+      const modelURL = URL + "model.json";
+      const metadataURL = URL + "metadata.json";
+
+      model = await tmImage.load(modelURL, metadataURL);
+      maxPredictions = model.getTotalClasses();
+
+      const flip = true;
+      webcam = new tmImage.Webcam(240, 240, flip);
+      await webcam.setup();
+      await webcam.play();
+      window.requestAnimationFrame(loop);
+
+      // webcam 캔버스 붙이기 (중복 방지)
+      $webcam.innerHTML = "";
+      $webcam.appendChild(webcam.canvas);
+
+      initialized = true;
+      setStatus("준비 완료! 시작을 누르면 게임이 진행됩니다.");
+    }
+
+    function startGame(){
+      if (!initialized) return;
+      running = true;
+      clearTimers();
+      startRound();
+    }
+
+    function startRound(){
+      if (!running) return;
+
+      phase = "countdown";
+      countdown = COUNTDOWN_SECONDS;
+      computerChoice = getComputerChoice();
+
+      setStatus(`⏳ ${countdown}\n(카메라 앞에서 가위/바위/보를 준비!)`);
+
+      countdownTimer = setInterval(() => {
+        if (!running) return;
+
+        countdown -= 1;
+        if (countdown > 0) {
+          setStatus(`⏳ ${countdown}\n(카메라 앞에서 가위/바위/보를 준비!)`);
+        } else {
+          clearInterval(countdownTimer);
+          countdownTimer = null;
+
+          phase = "capture";
+          setStatus("📸 지금! 판정합니다…");
+          // predict()가 다음 프레임에서 1회 판정하도록 phase를 capture로 둠
+        }
+      }, 1000);
+    }
+
+    async function loop(){
+      if (webcam) webcam.update();
+      await maybePredictOnce();
+      window.requestAnimationFrame(loop);
+    }
+
+    async function maybePredictOnce(){
+      if (!running) return;
+      if (!model || !webcam) return;
+
+      // capture 단계에서만 1회 판정
+      if (phase !== "capture") return;
+
+      const prediction = await model.predict(webcam.canvas);
+
+      // 가장 높은 확률의 클래스 찾기
+      let best = prediction[0];
+      for (let i = 1; i < prediction.length; i++){
+        if (prediction[i].probability > best.probability) best = prediction[i];
+      }
+
+      const userChoice = best.className;
+      const conf = best.probability;
+
+      // 신뢰도 낮으면 무효 처리 (자동 재시작)
+      if (conf < MIN_CONFIDENCE){
+        phase = "result";
+        setStatus(
+          `😳 잘 안 보였어요!\n` +
+          `인식: ${userChoice} (${Math.round(conf*100)}%)\n` +
+          `조금 더 크게 보여주고 다시 해볼까요?`
+        );
+
+        nextRoundTimer = setTimeout(() => {
+          if (running) startRound();
+        }, BETWEEN_ROUND_MS);
+
+        return;
+      }
+
+      const result = judge(userChoice, computerChoice);
+
+      if (result === "WIN") userScore += 1;
+      else if (result === "LOSE") compScore += 1;
+      else drawScore += 1;
+
+      renderScores();
+
+      phase = "result";
+      setStatus(
+        `🙋 사용자: ${userChoice} (${Math.round(conf*100)}%)\n` +
+        `💻 컴퓨터: ${computerChoice}\n` +
+        `🏁 결과: ${result}\n` +
+        `(${BETWEEN_ROUND_MS/1000}초 뒤 다음 라운드!)`
+      );
+
+      nextRoundTimer = setTimeout(() => {
+        if (running) startRound();
+      }, BETWEEN_ROUND_MS);
+    }
+  </script>
+</body>
+</html>
